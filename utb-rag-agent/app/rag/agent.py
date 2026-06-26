@@ -1,3 +1,6 @@
+import json
+from typing import AsyncGenerator
+
 from app.config import settings
 from app.rag.llm import ESCALAR_TOKEN, get_llm
 from app.rag.memory import Session, get_session
@@ -22,56 +25,109 @@ Contexto recuperado:
 
 _HISTORY_HEADER = "Conversación previa (solo como referencia de hilo, NO como fuente de hechos):\n{history}"
 
+_ESCALATE_MSG = "Tu consulta será atendida por un asesor de la mesa de servicio de la UTB."
 
-async def chat(message: str, session_id: str | None = None) -> ChatResponse:
-    session: Session | None = get_session(session_id) if session_id else None
 
-    chunks: list[RetrievedChunk] = await retrieve(message)
-    best_score = chunks[0].score if chunks else float("inf")
-
-    # Guardrail capa 1: sin contexto relevante → escalar
-    if not chunks or best_score > settings.escalate_threshold:
-        if session:
-            session.add("user", message)
-            session.add("assistant", "ESCALADO")
-        sources_out = [Source(doc=c.source, score=round(c.score, 4)) for c in chunks]
-        log_query(message, best_score, True, session_id, [s.model_dump() for s in sources_out])
-        return ChatResponse(
-            answer="Tu consulta será atendida por un asesor de la mesa de servicio de la UTB.",
-            escalate=True,
-            sources=sources_out,
-        )
-
+def _build_prompt(chunks: list[RetrievedChunk], session: Session | None) -> str:
     context = "\n\n---\n\n".join(f"[{c.source}]\n{c.text}" for c in chunks)
-
     history_block = ""
     if session:
         history = session.format_history()
         if history:
             history_block = _HISTORY_HEADER.format(history=history)
+    return _SYSTEM_PROMPT.format(context=context, history_block=history_block)
 
-    system = _SYSTEM_PROMPT.format(context=context, history_block=history_block)
 
+# ── Respuesta completa (usada por webhook WhatsApp) ─────────────────────────
+
+async def chat(message: str, session_id: str | None = None) -> ChatResponse:
+    session = get_session(session_id) if session_id else None
+    chunks = await retrieve(message)
+    best_score = chunks[0].score if chunks else float("inf")
+    sources_out = [Source(doc=c.source, score=round(c.score, 4)) for c in chunks]
+
+    if not chunks or best_score > settings.escalate_threshold:
+        if session:
+            session.add("user", message)
+            session.add("assistant", "ESCALADO")
+        log_query(message, best_score, True, session_id, [s.model_dump() for s in sources_out])
+        return ChatResponse(answer=_ESCALATE_MSG, escalate=True, sources=sources_out)
+
+    system = _build_prompt(chunks, session)
     llm = get_llm()
     answer = await llm.generate(system_prompt=system, user_message=message)
 
-    sources_out = [Source(doc=c.source, score=round(c.score, 4)) for c in chunks]
-
-    # Guardrail capa 2: el LLM decidió escalar
     if ESCALAR_TOKEN in answer.upper():
         if session:
             session.add("user", message)
             session.add("assistant", "ESCALADO")
         log_query(message, best_score, True, session_id, [s.model_dump() for s in sources_out])
-        return ChatResponse(
-            answer="Tu consulta será atendida por un asesor de la mesa de servicio de la UTB.",
-            escalate=True,
-            sources=sources_out,
-        )
+        return ChatResponse(answer=_ESCALATE_MSG, escalate=True, sources=sources_out)
 
     if session:
         session.add("user", message)
         session.add("assistant", answer)
-
     log_query(message, best_score, False, session_id, [s.model_dump() for s in sources_out])
     return ChatResponse(answer=answer, escalate=False, sources=sources_out)
+
+
+# ── Streaming SSE (usado por el frontend) ───────────────────────────────────
+
+async def chat_stream(
+    message: str, session_id: str | None = None
+) -> AsyncGenerator[str, None]:
+    """
+    Genera eventos SSE. Formato de cada línea: `data: {json}\\n\\n`
+
+    Eventos:
+      {"type": "token",   "text": "..."}           — fragmento de texto
+      {"type": "done",    "escalate": false, "sources": [...]}  — fin normal
+      {"type": "escalate","sources": [...]}         — guardrail disparado
+      {"type": "error",   "message": "..."}         — error inesperado
+    """
+    def sse(payload: dict) -> str:
+        return f"data: {json.dumps(payload, ensure_ascii=False)}\n\n"
+
+    session = get_session(session_id) if session_id else None
+
+    try:
+        chunks = await retrieve(message)
+        best_score = chunks[0].score if chunks else float("inf")
+        sources_out = [{"doc": c.source, "score": round(c.score, 4)} for c in chunks]
+
+        # Guardrail capa 1
+        if not chunks or best_score > settings.escalate_threshold:
+            if session:
+                session.add("user", message)
+                session.add("assistant", "ESCALADO")
+            log_query(message, best_score, True, session_id, sources_out)
+            yield sse({"type": "escalate", "sources": sources_out})
+            return
+
+        system = _build_prompt(chunks, session)
+        llm = get_llm()
+        full_answer: list[str] = []
+
+        async for token in llm.stream(system_prompt=system, user_message=message):
+            full_answer.append(token)
+            yield sse({"type": "token", "text": token})
+
+        answer = "".join(full_answer).strip()
+
+        # Guardrail capa 2
+        if ESCALAR_TOKEN in answer.upper():
+            if session:
+                session.add("user", message)
+                session.add("assistant", "ESCALADO")
+            log_query(message, best_score, True, session_id, sources_out)
+            yield sse({"type": "escalate", "sources": sources_out})
+            return
+
+        if session:
+            session.add("user", message)
+            session.add("assistant", answer)
+        log_query(message, best_score, False, session_id, sources_out)
+        yield sse({"type": "done", "escalate": False, "sources": sources_out})
+
+    except Exception as exc:
+        yield sse({"type": "error", "message": str(exc)})

@@ -100,3 +100,14 @@ class FeedbackRequest(BaseModel):
 
 class FeedbackResponse(BaseModel):
     status: str
+
+
+# ── Tareas de ingesta en background ─────────────────────────────────────────
+
+class IngestTaskResponse(BaseModel):
+    task_id: str
+    status: str
+    chunks_done: int
+    chunks_total: int
+    progress: float
+    error: str | None = None
