@@ -1,10 +1,13 @@
+import asyncio
+import hashlib
 import json
 import time
+from datetime import datetime, timedelta
 from typing import AsyncGenerator
 
 from app.config import settings
 from app.rag.llm import ESCALAR_TOKEN, get_llm
-from app.rag.memory import Session, Turn, get_session
+from app.rag.memory import Session, Turn, get_session, persist_turn
 from app.rag.metrics import log_query
 from app.rag.retriever import RetrievedChunk, retrieve
 from app.schemas import ChatResponse, Source
@@ -28,6 +31,31 @@ _HISTORY_HEADER = "Conversación previa (solo como referencia de hilo, NO como f
 
 _ESCALATE_MSG = "Tu consulta será atendida por un asesor de la mesa de servicio de la UTB."
 
+# ── Cache de respuestas frecuentes ──────────────────────────────────────────
+_cache: dict[str, tuple[ChatResponse, datetime]] = {}
+_CACHE_TTL = timedelta(minutes=5)
+_CACHE_MAX = 200
+
+
+def _cache_key(message: str) -> str:
+    return hashlib.md5(message.lower().strip().encode()).hexdigest()
+
+
+def _cache_get(message: str) -> ChatResponse | None:
+    key = _cache_key(message)
+    entry = _cache.get(key)
+    if entry and datetime.now() < entry[1]:
+        return entry[0]
+    _cache.pop(key, None)
+    return None
+
+
+def _cache_set(message: str, response: ChatResponse) -> None:
+    if len(_cache) >= _CACHE_MAX:
+        oldest = min(_cache, key=lambda k: _cache[k][1])
+        _cache.pop(oldest, None)
+    _cache[_cache_key(message)] = (response, datetime.now() + _CACHE_TTL)
+
 
 def _build_prompt(chunks: list[RetrievedChunk], session: Session | None) -> str:
     context = "\n\n---\n\n".join(f"[{c.source}]\n{c.text}" for c in chunks)
@@ -45,6 +73,32 @@ def _history_turns(session: Session | None) -> list[Turn] | None:
     return None
 
 
+def _build_sources(
+    chunks: list[RetrievedChunk],
+    threshold: float,
+) -> list[dict]:
+    """
+    Deduplica por documento (mejor distancia por doc), filtra por umbral,
+    convierte distancia → similitud (1 - dist), ordena desc, max 3.
+    """
+    best: dict[str, RetrievedChunk] = {}
+    for c in chunks:
+        if c.source not in best or c.score < best[c.source].score:
+            best[c.source] = c
+
+    relevant = [c for c in best.values() if c.score < threshold]
+    relevant.sort(key=lambda c: c.score)  # menor distancia primero = mayor similitud
+
+    return [
+        {
+            "doc": c.source,
+            "score": round(1.0 - c.score, 4),
+            "snippet": c.text[:220].replace("\n", " ").strip(),
+        }
+        for c in relevant[:3]
+    ]
+
+
 # ── Respuesta completa (usada por webhook WhatsApp / email) ─────────────────
 
 async def chat(
@@ -53,15 +107,24 @@ async def chat(
     channel: str = "web",
 ) -> ChatResponse:
     t0 = time.perf_counter()
+
+    # Cache sólo para queries sin sesión activa (WhatsApp/Email canales stateless)
+    if not session_id:
+        cached = _cache_get(message)
+        if cached:
+            return cached
+
     session = get_session(session_id) if session_id else None
     chunks = await retrieve(message, history=_history_turns(session))
     best_score = chunks[0].score if chunks else float("inf")
-    sources_out = [Source(doc=c.source, score=round(c.score, 4)) for c in chunks]
+    sources_out = [Source(**s) for s in _build_sources(chunks, settings.escalate_threshold)]
 
     if not chunks or best_score > settings.escalate_threshold:
-        if session:
+        if session and session_id:
             session.add("user", message)
             session.add("assistant", "ESCALADO")
+            asyncio.create_task(persist_turn(session_id, "user", message))
+            asyncio.create_task(persist_turn(session_id, "assistant", "ESCALADO"))
         await log_query(message, best_score, True, session_id,
                         [s.model_dump() for s in sources_out],
                         latency_ms=(time.perf_counter() - t0) * 1000,
@@ -74,21 +137,28 @@ async def chat(
     latency_ms = (time.perf_counter() - t0) * 1000
 
     if ESCALAR_TOKEN in answer.upper():
-        if session:
+        if session and session_id:
             session.add("user", message)
             session.add("assistant", "ESCALADO")
+            asyncio.create_task(persist_turn(session_id, "user", message))
+            asyncio.create_task(persist_turn(session_id, "assistant", "ESCALADO"))
         await log_query(message, best_score, True, session_id,
                         [s.model_dump() for s in sources_out],
                         latency_ms=latency_ms, channel=channel)
         return ChatResponse(answer=_ESCALATE_MSG, escalate=True, sources=sources_out)
 
-    if session:
+    if session and session_id:
         session.add("user", message)
         session.add("assistant", answer)
+        asyncio.create_task(persist_turn(session_id, "user", message))
+        asyncio.create_task(persist_turn(session_id, "assistant", answer))
     await log_query(message, best_score, False, session_id,
                     [s.model_dump() for s in sources_out],
                     latency_ms=latency_ms, channel=channel)
-    return ChatResponse(answer=answer, escalate=False, sources=sources_out)
+    result = ChatResponse(answer=answer, escalate=False, sources=sources_out)
+    if not session_id:
+        _cache_set(message, result)
+    return result
 
 
 # ── Streaming SSE (usado por el frontend web) ────────────────────────────────
@@ -107,12 +177,14 @@ async def chat_stream(
     try:
         chunks = await retrieve(message, history=_history_turns(session))
         best_score = chunks[0].score if chunks else float("inf")
-        sources_out = [{"doc": c.source, "score": round(c.score, 4)} for c in chunks]
+        sources_out = _build_sources(chunks, settings.escalate_threshold)
 
         if not chunks or best_score > settings.escalate_threshold:
-            if session:
+            if session and session_id:
                 session.add("user", message)
                 session.add("assistant", "ESCALADO")
+                asyncio.create_task(persist_turn(session_id, "user", message))
+                asyncio.create_task(persist_turn(session_id, "assistant", "ESCALADO"))
             await log_query(message, best_score, True, session_id, sources_out,
                             latency_ms=(time.perf_counter() - t0) * 1000,
                             channel=channel)
@@ -131,17 +203,21 @@ async def chat_stream(
         latency_ms = (time.perf_counter() - t0) * 1000
 
         if ESCALAR_TOKEN in answer.upper():
-            if session:
+            if session and session_id:
                 session.add("user", message)
                 session.add("assistant", "ESCALADO")
+                asyncio.create_task(persist_turn(session_id, "user", message))
+                asyncio.create_task(persist_turn(session_id, "assistant", "ESCALADO"))
             await log_query(message, best_score, True, session_id, sources_out,
                             latency_ms=latency_ms, channel=channel)
             yield sse({"type": "escalate", "sources": sources_out})
             return
 
-        if session:
+        if session and session_id:
             session.add("user", message)
             session.add("assistant", answer)
+            asyncio.create_task(persist_turn(session_id, "user", message))
+            asyncio.create_task(persist_turn(session_id, "assistant", answer))
         await log_query(message, best_score, False, session_id, sources_out,
                         latency_ms=latency_ms, channel=channel)
         yield sse({"type": "done", "escalate": False, "sources": sources_out})

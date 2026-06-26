@@ -16,7 +16,7 @@ if TYPE_CHECKING:
 class RetrievedChunk:
     text: str
     source: str
-    score: float  # distancia coseno: 0.0 = idéntico, más alto = más distante
+    score: float  # distancia coseno: 0.0 = idéntico, ~1.0 = sin relación
 
 
 def _get_collection() -> chromadb.Collection:
@@ -28,11 +28,6 @@ def _get_collection() -> chromadb.Collection:
 
 
 def _build_contextual_query(query: str, history: list[Turn] | None) -> str:
-    """
-    Para preguntas de seguimiento como "¿y cuánto cuesta?" sin referente explícito,
-    enriquecemos el query con los últimos 2 turnos del usuario para que el embedding
-    capture el tema de la conversación.
-    """
     if not history:
         return query
     recent_user = [t.content for t in history if t.role == "user"][-2:]
@@ -50,11 +45,10 @@ async def retrieve(
     contextual_query = _build_contextual_query(query, history)
 
     embedder = get_embedder()
-    vectors = await embedder.embed([contextual_query])
+    # RETRIEVAL_QUERY mejora la discriminación semántica en text-embedding-004
+    vectors = await embedder.embed([contextual_query], task_type="RETRIEVAL_QUERY")
 
     collection = _get_collection()
-
-    # Si hay reranker activo, pedimos el doble para rerankar luego
     fetch_k = k * 2 if settings.use_reranker else k
     results = collection.query(
         query_embeddings=vectors,
@@ -80,15 +74,13 @@ async def retrieve(
 async def _rerank(
     query: str, chunks: list[RetrievedChunk], top_k: int
 ) -> list[RetrievedChunk]:
-    """Cross-encoder reranking (carga el modelo la primera vez, luego queda en RAM)."""
     from app.rag.reranker import get_reranker
 
     reranker = get_reranker()
     pairs = [(query, c.text) for c in chunks]
     scores = await asyncio.to_thread(reranker.predict, pairs)
-
     ranked = sorted(zip(scores, chunks), key=lambda x: x[0], reverse=True)
     return [c for _, c in ranked[:top_k]]
 
 
-import asyncio  # noqa: E402 — importado al final para evitar ciclo
+import asyncio  # noqa: E402

@@ -50,8 +50,18 @@ async def init_db() -> None:
                 comment    TEXT
             )
         """)
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS session_turns (
+                id         INTEGER PRIMARY KEY AUTOINCREMENT,
+                session_id TEXT    NOT NULL,
+                ts         TEXT    NOT NULL,
+                role       TEXT    NOT NULL,
+                content    TEXT    NOT NULL
+            )
+        """)
         await db.execute("CREATE INDEX IF NOT EXISTS idx_queries_ts ON queries(ts)")
         await db.execute("CREATE INDEX IF NOT EXISTS idx_queries_session ON queries(session_id)")
+        await db.execute("CREATE INDEX IF NOT EXISTS idx_st_session ON session_turns(session_id, ts)")
         # Migración de esquema: añadir columna channel si no existe
         try:
             await db.execute(

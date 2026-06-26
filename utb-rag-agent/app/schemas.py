@@ -8,7 +8,8 @@ class ChatRequest(BaseModel):
 
 class Source(BaseModel):
     doc: str
-    score: float
+    score: float   # similitud coseno 0..1 (mayor = más relevante)
+    snippet: str = ""
 
 
 class ChatResponse(BaseModel):
@@ -82,11 +83,34 @@ class DocDeleteResponse(BaseModel):
     chunks_removed: int
 
 
+class ChunkPreview(BaseModel):
+    chunk_idx: int
+    text: str
+
+
+class DocChunksResponse(BaseModel):
+    doc: str
+    chunks: list[ChunkPreview]
+
+
 # ── Sesiones ────────────────────────────────────────────────────────────────
 
 class TurnRecord(BaseModel):
     role: str
     content: str
+
+
+class SessionSummary(BaseModel):
+    session_id: str
+    turn_count: int
+    created_at: float
+    updated_at: float
+    last_message: str | None = None
+
+
+class SessionListResponse(BaseModel):
+    total: int
+    sessions: list[SessionSummary]
 
 
 class SessionHistoryResponse(BaseModel):

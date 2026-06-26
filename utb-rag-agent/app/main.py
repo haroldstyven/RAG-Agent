@@ -23,6 +23,8 @@ from app.schemas import (
 @asynccontextmanager
 async def lifespan(_: FastAPI):
     await init_db()
+    from app.rag.memory import load_sessions_from_db
+    await load_sessions_from_db()
     yield
 
 

@@ -2,12 +2,14 @@ import asyncio
 from pathlib import Path
 
 import chromadb
-from fastapi import APIRouter, BackgroundTasks, HTTPException, UploadFile, File
+from fastapi import APIRouter, BackgroundTasks, HTTPException, Query, UploadFile, File
 
 from app.config import settings
 from app.rag.ingest import _get_collection, ingest_docs
 from app.rag.tasks import IngestTask, TaskStatus, create_task, get_task
 from app.schemas import (
+    ChunkPreview,
+    DocChunksResponse,
     DocDeleteResponse,
     DocInfo,
     DocsListResponse,
@@ -84,6 +86,53 @@ async def task_status(task_id: str):
         chunks_total=task.chunks_total,
         progress=task.progress,
         error=task.error,
+    )
+
+
+@router.post("/reindex", response_model=IngestTaskResponse)
+async def reindex_all(background_tasks: BackgroundTasks):
+    """Borra el índice completo y reindexa todos los documentos en /docs."""
+    import chromadb as _chromadb
+    client = _chromadb.PersistentClient(path=settings.chroma_path)
+    try:
+        client.delete_collection(settings.collection_name)
+    except Exception:
+        pass
+
+    task = create_task()
+    background_tasks.add_task(_run_ingest, task)
+
+    return IngestTaskResponse(
+        task_id=task.id,
+        status=task.status,
+        chunks_done=task.chunks_done,
+        chunks_total=task.chunks_total,
+        progress=task.progress,
+    )
+
+
+@router.get("/{doc_name}/chunks", response_model=DocChunksResponse)
+async def doc_chunks(doc_name: str, limit: int = Query(3, ge=1, le=10)):
+    """Devuelve los primeros N chunks de un documento para previsualización."""
+    collection = _get_collection()
+    result = collection.get(
+        where={"source": doc_name},
+        include=["documents", "metadatas"],
+    )
+    if not result["ids"]:
+        raise HTTPException(status_code=404, detail=f"Documento '{doc_name}' no encontrado en el índice.")
+
+    pairs = sorted(
+        zip(result["metadatas"], result["documents"]),
+        key=lambda x: x[0].get("chunk", 0),
+    )[:limit]
+
+    return DocChunksResponse(
+        doc=doc_name,
+        chunks=[
+            ChunkPreview(chunk_idx=meta.get("chunk", i), text=text[:400])
+            for i, (meta, text) in enumerate(pairs)
+        ],
     )
 
 
