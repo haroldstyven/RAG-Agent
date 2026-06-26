@@ -4,6 +4,7 @@ from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 
+from app.channels.email import router as email_router
 from app.channels.whatsapp import router as whatsapp_router
 from app.config import settings
 from app.db.database import init_db
@@ -40,6 +41,7 @@ app.add_middleware(
 )
 
 app.include_router(whatsapp_router)
+app.include_router(email_router)
 app.include_router(metrics_router)
 app.include_router(docs_router)
 app.include_router(sessions_router)

@@ -4,8 +4,9 @@ Tablas: queries, feedback.
 Migración automática desde metrics.jsonl al primer arranque.
 """
 import json
-from datetime import datetime, timezone
+from contextlib import asynccontextmanager
 from pathlib import Path
+from typing import AsyncGenerator
 
 import aiosqlite
 
@@ -14,16 +15,18 @@ DB_PATH = _PROJECT_ROOT / "data" / "metrics.db"
 _JSONL_PATH = _PROJECT_ROOT / "data" / "metrics.jsonl"
 
 
-async def get_db() -> aiosqlite.Connection:
-    db = await aiosqlite.connect(DB_PATH)
-    db.row_factory = aiosqlite.Row
-    await db.execute("PRAGMA journal_mode=WAL")  # lecturas concurrentes sin bloqueo
-    return db
+@asynccontextmanager
+async def get_db() -> AsyncGenerator[aiosqlite.Connection, None]:
+    """Context manager que abre una conexión, configura row_factory y WAL, y la cierra al salir."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        await db.execute("PRAGMA journal_mode=WAL")
+        yield db
 
 
 async def init_db() -> None:
     DB_PATH.parent.mkdir(parents=True, exist_ok=True)
-    async with await get_db() as db:
+    async with get_db() as db:
         await db.execute("""
             CREATE TABLE IF NOT EXISTS queries (
                 id         INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -49,6 +52,13 @@ async def init_db() -> None:
         """)
         await db.execute("CREATE INDEX IF NOT EXISTS idx_queries_ts ON queries(ts)")
         await db.execute("CREATE INDEX IF NOT EXISTS idx_queries_session ON queries(session_id)")
+        # Migración de esquema: añadir columna channel si no existe
+        try:
+            await db.execute(
+                "ALTER TABLE queries ADD COLUMN channel TEXT NOT NULL DEFAULT 'web'"
+            )
+        except Exception:
+            pass  # columna ya existe
         await db.commit()
 
     await _migrate_jsonl()
@@ -59,7 +69,7 @@ async def _migrate_jsonl() -> None:
     if not _JSONL_PATH.exists():
         return
 
-    async with await get_db() as db:
+    async with get_db() as db:
         row = await db.execute_fetchall("SELECT COUNT(*) as n FROM queries")
         if row[0]["n"] > 0:
             return  # ya migrado

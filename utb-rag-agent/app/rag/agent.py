@@ -45,9 +45,13 @@ def _history_turns(session: Session | None) -> list[Turn] | None:
     return None
 
 
-# ── Respuesta completa (usada por webhook WhatsApp) ─────────────────────────
+# ── Respuesta completa (usada por webhook WhatsApp / email) ─────────────────
 
-async def chat(message: str, session_id: str | None = None) -> ChatResponse:
+async def chat(
+    message: str,
+    session_id: str | None = None,
+    channel: str = "web",
+) -> ChatResponse:
     t0 = time.perf_counter()
     session = get_session(session_id) if session_id else None
     chunks = await retrieve(message, history=_history_turns(session))
@@ -60,7 +64,8 @@ async def chat(message: str, session_id: str | None = None) -> ChatResponse:
             session.add("assistant", "ESCALADO")
         await log_query(message, best_score, True, session_id,
                         [s.model_dump() for s in sources_out],
-                        latency_ms=(time.perf_counter() - t0) * 1000)
+                        latency_ms=(time.perf_counter() - t0) * 1000,
+                        channel=channel)
         return ChatResponse(answer=_ESCALATE_MSG, escalate=True, sources=sources_out)
 
     system = _build_prompt(chunks, session)
@@ -73,21 +78,25 @@ async def chat(message: str, session_id: str | None = None) -> ChatResponse:
             session.add("user", message)
             session.add("assistant", "ESCALADO")
         await log_query(message, best_score, True, session_id,
-                        [s.model_dump() for s in sources_out], latency_ms=latency_ms)
+                        [s.model_dump() for s in sources_out],
+                        latency_ms=latency_ms, channel=channel)
         return ChatResponse(answer=_ESCALATE_MSG, escalate=True, sources=sources_out)
 
     if session:
         session.add("user", message)
         session.add("assistant", answer)
     await log_query(message, best_score, False, session_id,
-                    [s.model_dump() for s in sources_out], latency_ms=latency_ms)
+                    [s.model_dump() for s in sources_out],
+                    latency_ms=latency_ms, channel=channel)
     return ChatResponse(answer=answer, escalate=False, sources=sources_out)
 
 
-# ── Streaming SSE (usado por el frontend) ───────────────────────────────────
+# ── Streaming SSE (usado por el frontend web) ────────────────────────────────
 
 async def chat_stream(
-    message: str, session_id: str | None = None
+    message: str,
+    session_id: str | None = None,
+    channel: str = "web",
 ) -> AsyncGenerator[str, None]:
     def sse(payload: dict) -> str:
         return f"data: {json.dumps(payload, ensure_ascii=False)}\n\n"
@@ -100,13 +109,13 @@ async def chat_stream(
         best_score = chunks[0].score if chunks else float("inf")
         sources_out = [{"doc": c.source, "score": round(c.score, 4)} for c in chunks]
 
-        # Guardrail capa 1
         if not chunks or best_score > settings.escalate_threshold:
             if session:
                 session.add("user", message)
                 session.add("assistant", "ESCALADO")
             await log_query(message, best_score, True, session_id, sources_out,
-                            latency_ms=(time.perf_counter() - t0) * 1000)
+                            latency_ms=(time.perf_counter() - t0) * 1000,
+                            channel=channel)
             yield sse({"type": "escalate", "sources": sources_out})
             return
 
@@ -121,13 +130,12 @@ async def chat_stream(
         answer = "".join(full_answer).strip()
         latency_ms = (time.perf_counter() - t0) * 1000
 
-        # Guardrail capa 2
         if ESCALAR_TOKEN in answer.upper():
             if session:
                 session.add("user", message)
                 session.add("assistant", "ESCALADO")
             await log_query(message, best_score, True, session_id, sources_out,
-                            latency_ms=latency_ms)
+                            latency_ms=latency_ms, channel=channel)
             yield sse({"type": "escalate", "sources": sources_out})
             return
 
@@ -135,7 +143,7 @@ async def chat_stream(
             session.add("user", message)
             session.add("assistant", answer)
         await log_query(message, best_score, False, session_id, sources_out,
-                        latency_ms=latency_ms)
+                        latency_ms=latency_ms, channel=channel)
         yield sse({"type": "done", "escalate": False, "sources": sources_out})
 
     except Exception as exc:

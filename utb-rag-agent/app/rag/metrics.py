@@ -18,15 +18,16 @@ async def log_query(
     session_id: str | None,
     sources: list[dict],
     latency_ms: float | None = None,
+    channel: str = "web",
 ) -> None:
     ts = datetime.now(timezone.utc).isoformat()
 
     # SQLite (primario)
-    async with await get_db() as db:
+    async with get_db() as db:
         await db.execute(
             """
-            INSERT INTO queries (ts, session_id, message, best_score, escalated, latency_ms, sources)
-            VALUES (?, ?, ?, ?, ?, ?, ?)
+            INSERT INTO queries (ts, session_id, message, best_score, escalated, latency_ms, sources, channel)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 ts,
@@ -36,6 +37,7 @@ async def log_query(
                 1 if escalated else 0,
                 round(latency_ms, 1) if latency_ms is not None else None,
                 json.dumps(sources, ensure_ascii=False),
+                channel,
             ),
         )
         await db.commit()
@@ -48,6 +50,7 @@ async def log_query(
         "message": message,
         "best_score": round(best_score, 4),
         "escalated": escalated,
+        "channel": channel,
         "sources": sources,
     }
     with _LOG_FILE.open("a", encoding="utf-8") as f:
@@ -63,7 +66,7 @@ async def log_feedback(
 ) -> None:
     from datetime import datetime, timezone
     ts = datetime.now(timezone.utc).isoformat()
-    async with await get_db() as db:
+    async with get_db() as db:
         await db.execute(
             """
             INSERT INTO feedback (ts, session_id, message, answer, thumb, comment)

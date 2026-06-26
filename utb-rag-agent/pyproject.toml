@@ -17,6 +17,7 @@ dependencies = [
     "pymupdf>=1.27.2.3",
     "aiosqlite>=0.22.1",
     "sentence-transformers>=5.6.0",
+    "sendgrid>=6.12.5",
 ]
 
 [build-system]

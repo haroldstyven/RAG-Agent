@@ -33,6 +33,17 @@ class Settings(BaseSettings):
     chunk_overlap: int = 50
     use_reranker: bool = False  # activar con USE_RERANKER=true en .env
 
+    # WhatsApp — Meta Cloud API
+    whatsapp_verify_token: str = ""      # token personalizado para verificar el webhook
+    whatsapp_app_secret: str = ""        # App Secret para validar firma HMAC
+    whatsapp_access_token: str = ""      # token de acceso permanente
+    whatsapp_phone_number_id: str = ""   # ID del número de teléfono en Meta
+
+    # SendGrid — canal email
+    sendgrid_api_key: str = ""
+    sendgrid_from_email: str = "agente@utb.edu.co"
+    sendgrid_support_email: str = "soporte@utb.edu.co"
+
     @field_validator("chroma_path")
     @classmethod
     def resolve_chroma_path(cls, v: str) -> str:

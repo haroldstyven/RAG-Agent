@@ -3,7 +3,7 @@ import json
 from fastapi import APIRouter, Query
 
 from app.db.database import get_db
-from app.schemas import MetricsSummary, QueryHistoryResponse, QueryRecord, Source
+from app.schemas import ChannelBreakdown, MetricsSummary, QueryHistoryResponse, QueryRecord, Source
 
 router = APIRouter(prefix="/metrics", tags=["metrics"])
 
@@ -13,16 +13,19 @@ async def metrics_summary(
     desde: str | None = Query(None, description="ISO date, e.g. 2026-01-01"),
     hasta: str | None = Query(None, description="ISO date, e.g. 2026-12-31"),
 ):
-    async with await get_db() as db:
+    async with get_db() as db:
         where, params = _date_filter(desde, hasta)
 
         row = await db.execute_fetchall(
             f"""
             SELECT
-                COUNT(*)                          AS total,
+                COUNT(*)                                      AS total,
                 SUM(CASE WHEN escalated=0 THEN 1 ELSE 0 END) AS resolved,
-                SUM(escalated)                    AS escalated,
-                AVG(best_score)                   AS avg_score
+                SUM(escalated)                                AS escalated,
+                AVG(best_score)                               AS avg_score,
+                SUM(CASE WHEN channel='web'       THEN 1 ELSE 0 END) AS ch_web,
+                SUM(CASE WHEN channel='whatsapp'  THEN 1 ELSE 0 END) AS ch_wa,
+                SUM(CASE WHEN channel='email'     THEN 1 ELSE 0 END) AS ch_email
             FROM queries {where}
             """,
             params,
@@ -33,13 +36,12 @@ async def metrics_summary(
             return MetricsSummary(
                 total_queries=0, resolved=0, escalated=0,
                 resolution_rate=0.0, avg_best_score=0.0,
-                thumbs_up=0, thumbs_down=0,
             )
 
         fb = await db.execute_fetchall(
             "SELECT SUM(thumb) AS up, SUM(1-thumb) AS down FROM feedback"
         )
-        up = fb[0]["up"] or 0
+        up   = fb[0]["up"]   or 0
         down = fb[0]["down"] or 0
 
         return MetricsSummary(
@@ -50,6 +52,11 @@ async def metrics_summary(
             avg_best_score=round(r["avg_score"] or 0, 4),
             thumbs_up=up,
             thumbs_down=down,
+            by_channel=ChannelBreakdown(
+                web=r["ch_web"] or 0,
+                whatsapp=r["ch_wa"] or 0,
+                email=r["ch_email"] or 0,
+            ),
         )
 
 
@@ -60,13 +67,17 @@ async def query_history(
     desde: str | None = Query(None),
     hasta: str | None = Query(None),
     escalated: bool | None = Query(None),
+    channel: str | None = Query(None, pattern="^(web|whatsapp|email)$"),
 ):
-    async with await get_db() as db:
+    async with get_db() as db:
         where, params = _date_filter(desde, hasta)
-        if escalated is not None:
-            connector = "AND" if where else "WHERE"
-            where += f" {connector} escalated = ?"
-            params.append(1 if escalated else 0)
+
+        for field, value in [("escalated", escalated), ("channel", channel)]:
+            if value is not None:
+                connector = "AND" if where else "WHERE"
+                where += f" {connector} {field} = ?"
+                params.append(1 if (field == "escalated" and value) else
+                               0 if (field == "escalated") else value)
 
         total_row = await db.execute_fetchall(
             f"SELECT COUNT(*) AS n FROM queries {where}", params
@@ -76,7 +87,7 @@ async def query_history(
         offset = (page - 1) * page_size
         rows = await db.execute_fetchall(
             f"""
-            SELECT ts, session_id, message, best_score, escalated, latency_ms, sources
+            SELECT ts, session_id, message, best_score, escalated, latency_ms, channel, sources
             FROM queries {where}
             ORDER BY ts DESC
             LIMIT ? OFFSET ?
@@ -92,6 +103,7 @@ async def query_history(
                 best_score=r["best_score"],
                 escalated=bool(r["escalated"]),
                 latency_ms=r["latency_ms"],
+                channel=r["channel"] or "web",
                 sources=[Source(**s) for s in json.loads(r["sources"])],
             )
             for r in rows

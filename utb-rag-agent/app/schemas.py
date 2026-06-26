@@ -30,6 +30,12 @@ class HealthResponse(BaseModel):
 
 # ── Métricas ────────────────────────────────────────────────────────────────
 
+class ChannelBreakdown(BaseModel):
+    web: int = 0
+    whatsapp: int = 0
+    email: int = 0
+
+
 class MetricsSummary(BaseModel):
     total_queries: int
     resolved: int
@@ -38,6 +44,7 @@ class MetricsSummary(BaseModel):
     avg_best_score: float
     thumbs_up: int = 0
     thumbs_down: int = 0
+    by_channel: ChannelBreakdown = ChannelBreakdown()
 
 
 class QueryRecord(BaseModel):
@@ -47,6 +54,7 @@ class QueryRecord(BaseModel):
     best_score: float
     escalated: bool
     latency_ms: float | None = None
+    channel: str = "web"
     sources: list[Source]
 
 
