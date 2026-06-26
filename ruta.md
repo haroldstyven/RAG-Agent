@@ -61,40 +61,39 @@
 > **Goal:** Las respuestas son más precisas, el agente entiende el hilo conversacional  
 > completo y los escalamientos son solo los necesarios — no falsos positivos.
 
-### 2.1 Retrieval conversacional
-- [ ] Modificar `app/rag/retriever.py` para aceptar `history: list[Turn] | None`
-- [ ] Componer el query de ChromaDB con los últimos 2 turnos + pregunta actual
-- [ ] Actualizar `agent.py` para pasar el historial de sesión al retriever
+### 2.1 Retrieval conversacional ✅
+- [x] Modificar `app/rag/retriever.py` para aceptar `history: list[Turn] | None`
+- [x] Componer el query de ChromaDB con los últimos 2 turnos + pregunta actual
+- [x] Actualizar `agent.py` para pasar el historial de sesión al retriever
 - [ ] Probar el caso "¿y cuánto cuesta?" (seguimiento sin contexto explícito)
 - [ ] Ajustar `ESCALATE_THRESHOLD` si el retrieval conversacional cambia la distribución de scores
 
-### 2.2 Reranking con cross-encoder
-- [ ] Agregar `sentence-transformers` al `pyproject.toml` con `uv add sentence-transformers`
-- [ ] Crear `app/rag/reranker.py` con `CrossEncoder("cross-encoder/ms-marco-MiniLM-L-6-v2")`
-- [ ] Integrar reranker en `retriever.py`: recuperar top_k × 2 → rerankar → devolver top_k
-- [ ] Hacer el reranker configurable (activar/desactivar por variable de entorno `USE_RERANKER`)
+### 2.2 Reranking con cross-encoder ✅
+- [x] Agregar `sentence-transformers` al `pyproject.toml` con `uv add sentence-transformers`
+- [x] Crear `app/rag/reranker.py` con `CrossEncoder("cross-encoder/ms-marco-MiniLM-L-6-v2")`
+- [x] Integrar reranker en `retriever.py`: recuperar top_k × 2 → rerankar → devolver top_k
+- [x] Hacer el reranker configurable (`USE_RERANKER=true` en .env, false por defecto)
 - [ ] Medir mejora en precision@k con las queries de prueba del corpus UTB
 
-### 2.3 Embedding batch para ingesta rápida
-- [ ] Investigar si `gemini-embedding-2` soporta batch nativo en la versión actual de la API
-- [ ] Si está disponible: reemplazar el loop de una llamada por `embed_content(contents=[...lista])`
-- [ ] Si no: paralelizar con `asyncio.gather()` para N chunks simultáneos (con rate limit)
+### 2.3 Embedding batch para ingesta rápida ✅
+- [x] `gemini-embedding-2` no soporta batch real — documentado
+- [x] Paralelizar con `asyncio.gather()` + `Semaphore(5)` + `asyncio.to_thread()` para 5 calls simultáneos
 - [ ] Medir tiempo de ingesta antes/después con el corpus de 6 documentos y con 20
 
-### 2.4 Métricas en base de datos
-- [ ] Agregar dependencia `aiosqlite` y `sqlalchemy[asyncio]` al `pyproject.toml`
-- [ ] Crear `app/db/models.py` con tabla `queries` (id, ts, session_id, message, best_score, escalated, latency_ms)
-- [ ] Crear `app/db/models.py` con tabla `feedback` (id, ts, session_id, message, answer, thumb, comment)
-- [ ] Reemplazar `app/rag/metrics.py` (JSONL) por inserts a SQLite
-- [ ] Migrar `app/routers/metrics.py` para leer desde SQLite con queries reales
-- [ ] Añadir filtros por fecha en `GET /metrics/queries?desde=&hasta=`
-- [ ] Mantener compatibilidad con el JSONL existente (importar histórico)
+### 2.4 Métricas en base de datos ✅
+- [x] Agregar dependencia `aiosqlite` al `pyproject.toml`
+- [x] Crear `app/db/database.py` con tablas `queries` y `feedback` (WAL mode, índices)
+- [x] Reemplazar `app/rag/metrics.py` (JSONL) por inserts async a SQLite + JSONL como backup
+- [x] Migrar `app/routers/metrics.py` para leer desde SQLite
+- [x] Añadir filtros por fecha `?desde=&hasta=` y filtro `?escalated=` en queries
+- [x] Migración automática desde JSONL histórico al primer arranque
 
-### 2.5 Endpoint de feedback
-- [ ] Implementar `POST /feedback` en `app/main.py` usando el schema `FeedbackRequest` existente
-- [ ] Persistir feedback en la tabla `feedback` de SQLite
-- [ ] Agregar botones 👍 / 👎 en `MessageBubble.tsx` para las respuestas del agente
-- [ ] Mostrar contador de thumbs en la vista de Métricas
+### 2.5 Endpoint de feedback ✅
+- [x] Implementar `POST /feedback` en `app/main.py`
+- [x] Persistir feedback en tabla `feedback` de SQLite
+- [x] Agregar botones 👍 / 👎 en `MessageBubble.tsx`
+- [x] Mostrar contadores de thumbs en dashboard de Métricas (6 stat cards)
+- [x] Añadir columna `latency_ms` en tabla de historial
 
 ---
 
@@ -246,9 +245,9 @@
 
 ## Deuda técnica conocida
 
-- [ ] `GeminiEmbedder.embed()` hace una llamada HTTP por chunk (no batch) — ver Fase 2.3
+- [x] `GeminiEmbedder.embed()` hace una llamada HTTP por chunk — ✅ paralelizado con gather+semaphore
 - [ ] `_store` de sesiones muere al reiniciar uvicorn — ver Fase 4.2
-- [ ] `JSONL` de métricas no consultable por fecha — ver Fase 2.4
+- [x] `JSONL` de métricas no consultable por fecha — ✅ migrado a SQLite con filtros
 - [ ] Threshold `ESCALATE_THRESHOLD=0.50` sin calibración formal — ver Fase 2.1
 - [ ] Ingest bloquea el request thread con corpus grandes — ver Fase 1.3
 - [ ] Sin autenticación en ningún endpoint — ver Fase 4.1

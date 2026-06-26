@@ -31,6 +31,7 @@ class Settings(BaseSettings):
     escalate_threshold: float = 0.50
     chunk_size: int = 500
     chunk_overlap: int = 50
+    use_reranker: bool = False  # activar con USE_RERANKER=true en .env
 
     @field_validator("chroma_path")
     @classmethod

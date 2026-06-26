@@ -1,9 +1,12 @@
+import asyncio
 from typing import Protocol, runtime_checkable
 
 import httpx
 from google import genai
 
 from app.config import settings
+
+_GEMINI_CONCURRENCY = 5  # llamadas simultáneas a la API de embeddings
 
 
 @runtime_checkable
@@ -13,19 +16,26 @@ class Embedder(Protocol):
 
 class GeminiEmbedder:
     def __init__(self):
-        # text-embedding-004 only available in v1 (not v1beta default)
         self._client = genai.Client(api_key=settings.gemini_api_key)
         self._model = settings.gemini_embed_model
 
     async def embed(self, texts: list[str]) -> list[list[float]]:
-        vectors = []
-        for text in texts:
-            result = self._client.models.embed_content(
-                model=self._model,
-                contents=text,
-            )
-            vectors.append(result.embeddings[0].values)
-        return vectors
+        """
+        gemini-embedding-2 no soporta batch real — llamamos N veces.
+        Usamos asyncio.gather + semáforo para paralelizar sin sobrepasar el rate limit.
+        """
+        sem = asyncio.Semaphore(_GEMINI_CONCURRENCY)
+
+        async def _one(text: str) -> list[float]:
+            async with sem:
+                result = await asyncio.to_thread(
+                    self._client.models.embed_content,
+                    model=self._model,
+                    contents=text,
+                )
+                return result.embeddings[0].values
+
+        return list(await asyncio.gather(*[_one(t) for t in texts]))
 
 
 class OllamaEmbedder:

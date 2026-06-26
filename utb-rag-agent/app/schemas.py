@@ -34,8 +34,10 @@ class MetricsSummary(BaseModel):
     total_queries: int
     resolved: int
     escalated: int
-    resolution_rate: float        # porcentaje resueltas en primer nivel
-    avg_best_score: float         # menor = más relevante
+    resolution_rate: float
+    avg_best_score: float
+    thumbs_up: int = 0
+    thumbs_down: int = 0
 
 
 class QueryRecord(BaseModel):
@@ -44,6 +46,7 @@ class QueryRecord(BaseModel):
     message: str
     best_score: float
     escalated: bool
+    latency_ms: float | None = None
     sources: list[Source]
 
 
